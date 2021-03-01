@@ -116,11 +116,18 @@ class ProjCommonSpace(TransformerMixin):
             covsfb = X[:, fb]
             C = covsfb.mean(axis=0)
             eigvals, eigvecs = eigh(C)
+            eigvals = eigvals.real
+            eigvecs = eigvecs.real
             ix = np.argsort(np.abs(eigvals))[::-1]
             evecs = eigvecs[:, ix]
-            evecs = evecs[:, :self.n_compo].T
-            self.filters_.append(evecs)  # (fb, compo, chan) row vec
-            self.patterns_.append(pinv(evecs).T)  # (fb, compo, chan)
+            evecs /= np.linalg.norm(evecs, axis=0)[None, :]
+
+            evecs = evecs[:, :self.n_compo]
+            pattern = C @ evecs @ np.linalg.inv(evecs.T @ C @ evecs)
+
+            self.filters_.append(evecs.T)  # (fb, compo, chan) row vec
+            self.patterns_.append(pattern.T)  # (fb, compo, chan)
+
         return self
 
     def transform(self, X):
@@ -148,18 +155,24 @@ class ProjSPoCSpace(TransformerMixin):
         self.scale_ = _get_scale(X, self.scale)
         self.filters_ = []
         self.patterns_ = []
+        self.evals_ = []
         for fb in range(n_fb):
             covsfb = X[:, fb]
             C = covsfb.mean(axis=0)
             Cz = np.mean(covsfb * target[:, None, None], axis=0)
             C = shrink(C, self.shrink)
             eigvals, eigvecs = eigh(Cz, C)
+            eigvals = eigvals.real
+            eigvecs = eigvecs.real
             ix = np.argsort(np.abs(eigvals))[::-1]
             evecs = eigvecs[:, ix]
+            eigvals = eigvals[ix]
+            pattern = pinv(evecs.T).T
             evecs = evecs[:, :self.n_compo].T
             evecs /= np.linalg.norm(evecs, axis=1)[:, None]
             self.filters_.append(evecs)  # (fb, compo, chan) row vec
-            self.patterns_.append(pinv(evecs).T)  # (fb, compo, chan)
+            self.patterns_.append(pattern[:self.n_compo,:])  # (fb, compo, chan)
+            self.evals_.append(eigvals[:self.n_compo])
         return self
 
     def transform(self, X):
@@ -229,6 +242,111 @@ class ProjSPoCSpace(TransformerMixin):
             mask=mask, outlines=outlines, contours=contours,
             image_interp=image_interp, show=show, average=average,
             head_pos=head_pos, axes=axes)
+
+
+class ProjCSPSpace(TransformerMixin):
+    def __init__(self, shrink=0, scale=1, n_compo=71, reg=1e-7):
+        self.shrink = shrink
+        self.scale = scale
+        self.n_compo = n_compo
+        self.reg = reg
+
+    def fit(self, X, y):
+        n_sub, n_fb, n_channels, _ = X.shape
+        
+        self.scale_ = _get_scale(X, self.scale)
+        self.filters_ = []
+        self.patterns_ = []
+        self.evals_ = []
+        for fb in range(n_fb):
+            covsfb = X[:, fb]
+            C0 = covsfb[y == 0].mean(axis=0)
+            C1 = covsfb[y != 0].mean(axis=0)
+            C0 = shrink(C0, self.shrink)
+            C1 = shrink(C1, self.shrink)
+            eigvals, eigvecs = eigh(C1, C0)
+            eigvals = eigvals.real
+            eigvecs = eigvecs.real
+            eigvals = np.max(np.concatenate((eigvals[:,None], 1/eigvals[:,None]), axis = 1), axis = 1)
+            ix = np.argsort(np.abs(eigvals))[::-1]
+            evecs = eigvecs[:, ix]
+            eigvals = eigvals[ix]
+            pattern = pinv(evecs.T).T
+            evecs = evecs[:, :self.n_compo].T
+            evecs /= np.linalg.norm(evecs, axis=1)[:, None]
+            self.filters_.append(evecs)  # (fb, compo, chan) row vec
+            self.patterns_.append(pattern[:self.n_compo,:])  # (fb, compo, chan)
+            self.evals_.append(eigvals[:self.n_compo])
+
+        return self
+
+    def transform(self, X):
+        n_sub, n_fb, _, _ = X.shape
+        Xout = np.empty((n_sub, n_fb, self.n_compo, self.n_compo))
+        Xs = self.scale_ * X
+        for fb in range(n_fb):
+            filters = self.filters_[fb]  # (compo, chan)
+            for sub in range(n_sub):
+                Xout[sub, fb] = filters @ Xs[sub, fb] @ filters.T
+                Xout[sub, fb] += self.reg * np.eye(self.n_compo)
+        return Xout  # (sub, fb, compo, compo)
+
+    def plot_patterns(self, info, components=None, fband=None,
+                      ch_type=None, layout=None,
+                      vmin=None, vmax=None, cmap='RdBu_r', sensors=True,
+                      colorbar=True, scalings=None, units='a.u.', res=64,
+                      size=1, cbar_fmt='%3.1f', name_format='CSP%01d',
+                      show=True, show_names=False, title=None, mask=None,
+                      mask_params=None, outlines='head', contours=6,
+                      image_interp='bilinear', average=None, head_pos=None,
+                      axes=None):
+
+        if components is None:
+            components = np.arange(self.n_compo)
+        patterns = self.patterns_[fband]
+
+        # set sampling frequency to have 1 component per time point
+        info = cp.deepcopy(info)
+        info['sfreq'] = 1.
+        norm_patterns = patterns / np.linalg.norm(patterns, axis=1)[:, None]
+        patterns = EvokedArray(norm_patterns.T, info, tmin=0)
+        return patterns.plot_topomap(
+            times=components, ch_type=ch_type, layout=layout,
+            vmin=vmin, vmax=vmax, cmap=cmap, colorbar=colorbar, res=res,
+            cbar_fmt=cbar_fmt, sensors=sensors,
+            scalings=scalings, units=units, time_unit='s',
+            time_format=name_format, size=size, show_names=show_names,
+            title=title, mask_params=mask_params, mask=mask, outlines=outlines,
+            contours=contours, image_interp=image_interp, show=show,
+            average=average, head_pos=head_pos, axes=axes)
+
+    def plot_filters(self, info, components=None, fband=None,
+                     ch_type=None, layout=None,
+                     vmin=None, vmax=None, cmap='RdBu_r', sensors=True,
+                     colorbar=True, scalings=None, units='a.u.', res=64,
+                     size=1, cbar_fmt='%3.1f', name_format='CSP%01d',
+                     show=True, show_names=False, title=None, mask=None,
+                     mask_params=None, outlines='head', contours=6,
+                     image_interp='bilinear', average=None, head_pos=None,
+                     axes=None):
+
+        if components is None:
+            components = np.arange(self.n_compo)
+        filters = self.filters_[self.fbands.index(fband)]
+
+        # set sampling frequency to have 1 component per time point
+        info = cp.deepcopy(info)
+        info['sfreq'] = 1.
+        filters = EvokedArray(filters, info, tmin=0)
+        return filters.plot_topomap(
+            times=components, ch_type=ch_type, layout=layout, vmin=vmin,
+            vmax=vmax, cmap=cmap, colorbar=colorbar, res=res,
+            cbar_fmt=cbar_fmt, sensors=sensors, scalings=scalings, units=units,
+            time_unit='s', time_format=name_format, size=size,
+            show_names=show_names, title=title, mask_params=mask_params,
+            mask=mask, outlines=outlines, contours=contours,
+            image_interp=image_interp, show=show, average=average,
+            head_pos=head_pos, axes=axes)            
 
 
 def mean_covs(covmats, rank, tol=10e-4, maxiter=50, init=None,
