@@ -59,7 +59,7 @@ n_epochs = X.shape[0]
 winlen = X.shape[2]
 
 # compute covariance matrices
-C =  X @ X.swapaxes(-1, -2) / n_channels
+C =  X @ X.swapaxes(-1, -2) / winlen
 
 # perform OAS shrinkage
 mu = np.trace(C, axis1=-1, axis2=-2) / n_channels

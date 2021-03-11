@@ -91,8 +91,6 @@ class PatternScorer:
                 evecs = evecs[:, ix]
                 evals = evals[ix]
 
-                evecs /= np.linalg.norm(evecs, axis=0)[None, :]
-
                 # pick largest or smalled eigenvectors (both are possible solutions)
                 if scaled:
                     pttrns = pinv(evecs).T @ np.sqrt(np.diag(evals))
@@ -108,58 +106,6 @@ class PatternScorer:
 
                 a_hat[:,:,f] = pttrns / np.linalg.norm(pttrns, 2, 0)
                 eigvals[:,f] = evals
-
-        elif self.name == 'upper':
-
-            # extract model parameters
-            rs_betas = pipeline.steps[-1][1].coef_[None,:].copy()
-            rs_origin = np.zeros(rs_betas.shape)
-
-            rs_points = np.concatenate((rs_origin, rs_betas), axis=0)
-
-            # regression space 2 upper space
-            us_points = pipeline.steps[-2][1].inverse_transform(rs_points)
-
-            # remove any bias/mean introduced by the denormalization
-            us_beta = us_points[1:,:] - us_points[0:1,:]
-
-            # compute pattern in tangent space
-
-            # # TODO compute block diagonal covariance for each frequency band
-            # Xproj = pipeline.steps[0][1].transform(X.copy())
-            # Xproj = pipeline.steps[1][1].transform(Xproj)
-
-            # covest = OAS().fit(Xproj)
-            # Cxx = covest.covariance_.copy()
-
-            # us_pttrn = Cxx @ us_beta.T / (us_beta @ Cxx @ us_beta.T)
-
-            # # upper space 2 matrix space
-            # ms_pttrn = pipeline.steps[-3][1].inverse_transform(us_pttrn.T)
-            ms_pttrn = pipeline.steps[-3][1].inverse_transform(us_beta)
-
-            n_compo = ms_pttrn.shape[2]
-            # for each frequency band
-            a_hat = np.zeros((X.shape[2], n_compo, n_fb))
-
-            for f in range(n_fb):
-                # approximate the pattern matrix with the left singular vector associated to the
-                # largest singular value                
-                U, s, _ = svd(ms_pttrn[0,f])
-
-                ix = np.argsort(s)[::-1]
-                U = U[:, ix]
-                s = s[ix]
-
-                pttrns = U
-
-                if type(pipeline.steps[0][1]) is ProjCommonSpace:
-                    # invert common space projection
-                    filters = pipeline.steps[0][1].filters_[0]
-                    inv_filters = pinv(filters)
-                    pttrns = inv_filters @ pttrns                
-
-                a_hat[:,:,f] = pttrns / np.linalg.norm(pttrns, 2, 0)
 
         elif self.name == 'spoc' or self.name == 'csp':
 

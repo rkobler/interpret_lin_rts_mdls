@@ -6,7 +6,7 @@ from pyriemann.tangentspace import TangentSpace
 
 
 class Riemann(TransformerMixin):
-    def __init__(self, n_fb=9, metric='wasserstein'):
+    def __init__(self, n_fb=9, metric='riemann'):
         self.n_fb = n_fb
         self.ts = [TangentSpace(metric=metric) for fb in range(n_fb)]
 
@@ -104,111 +104,9 @@ class NaiveVec(TransformerMixin):
 
         for sub in range(n_sub):
             for fb in range(self.n_fb):
-                Xout[sub, fb][np.triu_indices(n_channels)] = X[sub, fb] * 0.5 # share weights equally 
-                Xout[sub, fb] += Xout[sub, fb].T
-                # Xout[sub, fb][np.triu_indices(n_channels)] = X[sub, fb]# share weights equally 
-                # Xout[sub, fb] += Xout[sub, fb].T - np.diag(np.diag(Xout[sub, fb]))
+                if self.method == 'upper':
+                    Xout[sub, fb][np.triu_indices(n_channels)] = X[sub, fb] * 0.5 # share weights equally 
+                    Xout[sub, fb] += Xout[sub, fb].T
+                else:
+                    raise NotImplementedError()
         return Xout        
-
-
-class RiemannSnp(TransformerMixin):
-    def __init__(self, n_fb=9, rank=70):
-        self.n_fb = n_fb
-        self.ts = [Snp(rank=rank) for fb in range(n_fb)]
-        self.rank = rank
-
-    def fit(self, X, y):
-        for fb in range(self.n_fb):
-            self.ts[fb].fit(X[:, fb, :, :])
-        return self
-
-    def transform(self, X):
-        n_sub, n_fb, p, _ = X.shape
-        q = p * self.rank
-        Xout = np.empty((n_sub, n_fb, q))
-        for fb in range(n_fb):
-            Xout[:, fb, :] = self.ts[fb].transform(X[:, fb, :, :])
-        return Xout.reshape(n_sub, -1)  # (sub, fb * c*(c+1)/2)
-
-
-class Snp(TransformerMixin):
-    def __init__(self, rank):
-        """Init."""
-        self.rank = rank
-
-    def fit(self, X, y=None, ref=None):
-        if ref is None:
-            #  ref = mean_covs(X, rank=self.rank)
-            ref = np.mean(X, axis=0)
-        Y = to_quotient(ref, self.rank)
-        self.reference_ = ref
-        self.Y_ref_ = Y
-        return self
-
-    def transform(self, X, verbose=False):
-        n_mat, n, _ = X.shape
-        output = np.zeros((n_mat, n * self.rank))
-        for j, C in enumerate(X):
-            if verbose:
-                print('\r %d / %d' % (j+1, n_mat), end='', flush=True)
-            Y = to_quotient(C, self.rank)
-            output[j] = logarithm_(Y, self.Y_ref_).ravel()
-        return output
-
-
-def to_quotient(C, rank):
-    d, U = np.linalg.eigh(C)
-    U = U[:, -rank:]
-    d = d[-rank:]
-    Y = U * np.sqrt(d)
-    return Y
-
-
-def distance2(S1, S2, rank=None):
-    Sq = sqrtm(S1, rank)
-    P = sqrtm(np.dot(Sq, np.dot(S2, Sq)), rank)
-    return np.trace(S1) + np.trace(S2) - 2 * np.trace(P)
-
-
-def mean_covs(covmats, rank, tol=10e-4, maxiter=50, init=None,
-              sample_weight=None):
-    Nt, Ne, Ne = covmats.shape
-    if sample_weight is None:
-        sample_weight = np.ones(Nt)
-    if init is None:
-        C = np.mean(covmats, axis=0)
-    else:
-        C = init
-    k = 0
-    K = sqrtm(C, rank)
-    crit = np.finfo(np.float64).max
-    # stop when J<10^-9 or max iteration = 50
-    while (crit > tol) and (k < maxiter):
-        k = k + 1
-        J = np.zeros((Ne, Ne))
-        for index, Ci in enumerate(covmats):
-            tmp = np.dot(np.dot(K, Ci), K)
-            J += sample_weight[index] * sqrtm(tmp)
-        Knew = sqrtm(J, rank)
-        crit = np.linalg.norm(Knew - K, ord='fro')
-        K = Knew
-    if k == maxiter:
-        print('Max iter reach')
-    C = np.dot(K, K)
-    return C
-
-
-def sqrtm(C, rank=None):
-    if rank is None:
-        rank = C.shape[0]
-    d, U = np.linalg.eigh(C)
-    U = U[:, -rank:]
-    d = d[-rank:]
-    return np.dot(U, np.sqrt(np.abs(d))[:, None] * U.T)
-
-
-def logarithm_(Y, Y_ref):
-    prod = np.dot(Y_ref.T, Y)
-    U, D, V = np.linalg.svd(prod, full_matrices=False)
-    Q = np.dot(U, V).T
-    return np.dot(Y, Q) - Y_ref
